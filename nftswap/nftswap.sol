@@ -1,7 +1,9 @@
-pragma solidity 0.8.0; ss
+pragma solidity 0.8.0; 
 
 
-import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
+import 'https://github.com/OpenZeppelin/openzeppelin-contracts/blob/master/contracts/token/ERC721/ERC721.sol';
+import 'https://github.com/OpenZeppelin/openzeppelin-contracts/blob/master/contracts/access/Ownable.sol';
+import "@openzeppelin/contracts/utils/Counters.sol";
 
 /**
 * @title Hashed Timelock Contracts (HTLCs) on Ethereum ERC721 tokens.
@@ -31,20 +33,20 @@ contract HashedTimelockERC721 {
         address tokenContract,
         uint256 tokenId,
         bytes32 hashlock,
-        uint256 timelock
+        address requestedcontract,
+        uint256 requestedid
     );
     event HTLCERC721Withdraw(bytes32 indexed contractId);
     event HTLCERC721Refund(bytes32 indexed contractId);
 
     struct LockContract {
-        address sender;
+        address Sender;
         address receiver;
         address tokenContract;
         uint256 tokenId;
         bytes32 hashlock;
-        // locked UNTIL this time. Unit depends on consensus algorithm.
-        // PoA, PoA and IBFT all use seconds. But Quorum Raft uses nano-seconds
-        uint256 timelock;
+        address requestedcontract;
+        uint256 requestedid;
         bool withdrawn;
         bool refunded;
         bytes32 preimage;
@@ -59,22 +61,9 @@ contract HashedTimelockERC721 {
         );
         _;
     }
-    modifier futureTimelock(uint256 _time) {
-        // only requirement is the timelock time is after the last blocktime (now).
-        // probably want something a bit further in the future then this.
-        // but this is still a useful sanity check:
-        require(_time > block.timestamp, "timelock time must be in the future");
-        _;
-    }
+    
     modifier contractExists(bytes32 _contractId) {
         require(haveContract(_contractId), "contractId does not exist");
-        _;
-    }
-    modifier hashlockMatches(bytes32 _contractId, bytes32 _x) {
-        require(
-            contracts[_contractId].hashlock == sha256(abi.encodePacked(_x)),
-            "hashlock hash does not match"
-        );
         _;
     }
     modifier withdrawable(bytes32 _contractId) {
@@ -85,10 +74,9 @@ contract HashedTimelockERC721 {
         _;
     }
     modifier refundable(bytes32 _contractId) {
-        require(contracts[_contractId].sender == msg.sender, "refundable: not sender");
+        require(contracts[_contractId].Sender == msg.sender, "refundable: not sender");
         require(contracts[_contractId].refunded == false, "refundable: already refunded");
         require(contracts[_contractId].withdrawn == false, "refundable: already withdrawn");
-        require(contracts[_contractId].timelock <= block.timestamp, "refundable: timelock not yet passed");
         _;
     }
 
@@ -102,8 +90,6 @@ contract HashedTimelockERC721 {
      *       See isApprovedOrOwner check in tokensTransferable modifier.
      * @param _receiver Receiver of the tokens.
      * @param _hashlock A sha-2 sha256 hash hashlock.
-     * @param _timelock UNIX epoch seconds time that the lock expires at.
-     *                  Refunds can be made after this time.
      * @param _tokenContract ERC20 Token contract address.
      * @param _tokenId Id of the token to lock up.
      * @return contractId Id of the new HTLC. This is needed for subsequent
@@ -112,23 +98,24 @@ contract HashedTimelockERC721 {
     function newContract(
         address _receiver,
         bytes32 _hashlock,
-        uint256 _timelock,
         address _tokenContract,
-        uint256 _tokenId
+        uint256 _tokenId,
+        address _requestedcontract,
+        uint256 _requestedid
     )
         external
         tokensTransferable(_tokenContract, _tokenId)
-        futureTimelock(_timelock)
         returns (bytes32 contractId)
     {
-        contractId = sha256(
+        contractId = keccak256(
             abi.encodePacked(
                 msg.sender,
                 _receiver,
                 _tokenContract,
                 _tokenId,
-                _hashlock,
-                _timelock
+                 _hashlock,
+                _requestedcontract,
+                _requestedid
             )
         );
 
@@ -147,10 +134,11 @@ contract HashedTimelockERC721 {
             _tokenContract,
             _tokenId,
             _hashlock,
-            _timelock,
+            _requestedcontract,
+            _requestedid,
             false,
             false,
-            0x0
+            _hashlock
         );
 
         emit HTLCERC721New(
@@ -160,7 +148,8 @@ contract HashedTimelockERC721 {
             _tokenContract,
             _tokenId,
             _hashlock,
-            _timelock
+            _requestedcontract,
+            _requestedid
         );
     }
 
@@ -175,13 +164,13 @@ contract HashedTimelockERC721 {
     function withdraw(bytes32 _contractId, bytes32 _preimage)
         external
         contractExists(_contractId)
-        hashlockMatches(_contractId, _preimage)
         withdrawable(_contractId)
         returns (bool)
     {
         LockContract storage c = contracts[_contractId];
-        c.preimage = _preimage;
+        c.hashlock = _preimage;
         c.withdrawn = true;
+        ERC721(c.requestedcontract)._transfer(msg.sender, c.Sender, c.requestedid);
         ERC721(c.tokenContract).transferFrom(address(this), c.receiver, c.tokenId);
         emit HTLCERC721Withdraw(_contractId);
         return true;
@@ -202,7 +191,7 @@ contract HashedTimelockERC721 {
     {
         LockContract storage c = contracts[_contractId];
         c.refunded = true;
-        ERC721(c.tokenContract).transferFrom(address(this), c.sender, c.tokenId);
+        ERC721(c.tokenContract).transferFrom(address(this), c.Sender, c.tokenId);
         emit HTLCERC721Refund(_contractId);
         return true;
     }
@@ -221,22 +210,20 @@ contract HashedTimelockERC721 {
             address tokenContract,
             uint256 tokenId,
             bytes32 hashlock,
-            uint256 timelock,
             bool withdrawn,
             bool refunded,
             bytes32 preimage
         )
     {
         if (haveContract(_contractId) == false)
-            return (address(0), address(0), address(0), 0, 0, 0, false, false, 0);
+            return (address(0), address(0), address(0), 0, 0,false, false, 0);
         LockContract storage c = contracts[_contractId];
         return (
-            c.sender,
+            c.Sender,
             c.receiver,
             c.tokenContract,
             c.tokenId,
             c.hashlock,
-            c.timelock,
             c.withdrawn,
             c.refunded,
             c.preimage
@@ -252,7 +239,7 @@ contract HashedTimelockERC721 {
         view
         returns (bool exists)
     {
-        exists = (contracts[_contractId].sender != address(0));
+        exists = (contracts[_contractId].Sender != address(0));
     }
 
 }
